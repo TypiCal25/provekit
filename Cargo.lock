@@ -4125,7 +4125,7 @@ dependencies = [
 [[package]]
 name = "provekit-whir"
 version = "0.2.0"
-source = "git+https://github.com/TypiCal25/whir.git?rev=f2ed0b39a28624645f4cfb91a4a51bbd9a111f02#f2ed0b39a28624645f4cfb91a4a51bbd9a111f02"
+source = "git+https://github.com/TypiCal25/whir.git?rev=330f6f215bf42aae48eede0a2df3539c70934919#330f6f215bf42aae48eede0a2df3539c70934919"
 dependencies = [
  "approx",
  "ark-ff 0.6.0",

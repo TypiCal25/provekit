@@ -198,8 +198,8 @@ spongefish = { package = "provekit-spongefish", version = "0.2.0", features = [
 spongefish-pow = { package = "provekit-spongefish-pow", version = "0.2.0" }
 whir = { package = "provekit-whir", version = "0.2.0", features = ["tracing"] }
 
-# provekit-whir 0.2.0 plus the parallel blinding-evaluation change
-# (TypiCal25/whir, perf/batch-blinding-evals). Drop this once a provekit-whir
+# provekit-whir 0.2.0 plus both WHIR perf changes
+# (TypiCal25/whir, umbra/v0.2.0-perf). Drop this once a provekit-whir
 # release contains it.
 [patch.crates-io]
-provekit-whir = { git = "https://github.com/TypiCal25/whir.git", rev = "f2ed0b39a28624645f4cfb91a4a51bbd9a111f02" }
+provekit-whir = { git = "https://github.com/TypiCal25/whir.git", rev = "330f6f215bf42aae48eede0a2df3539c70934919" }
