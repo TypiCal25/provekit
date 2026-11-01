@@ -242,3 +242,111 @@ pub fn calculate_external_row_of_r1cs_matrices(
     let (at, bt, ct) = transpose_r1cs_matrices(r1cs);
     multiply_transposed_by_eq_alpha(&at, &bt, &ct, alpha, r1cs)
 }
+
+/// Computes the same external row as
+/// [`calculate_external_row_of_r1cs_matrices`] without transposing the
+/// matrices.
+///
+/// Each matrix is multiplied on the left by eq(alpha, ·), which walks it row by
+/// row and adds every entry into its column's sum. Rows are visited in
+/// ascending order, so each column's terms are multiplied and added in the
+/// same order as in the transposed product, and the result is identical.
+///
+/// Suits a verifier, which computes this once per proof: the transposes cost
+/// more than the product itself, and only the prover's row-parallel product
+/// needs them.
+#[instrument(skip_all)]
+pub fn calculate_external_row_without_transpose(
+    alpha: &[FieldElement],
+    r1cs: &R1CS,
+) -> [Vec<FieldElement>; 3] {
+    let eq_alpha =
+        calculate_evaluations_over_boolean_hypercube_for_eq(alpha, r1cs.num_constraints());
+    let eq_alpha = eq_alpha.as_slice();
+    let ((a, b), c) = rayon::join(
+        || rayon::join(|| eq_alpha * r1cs.a(), || eq_alpha * r1cs.b()),
+        || eq_alpha * r1cs.c(),
+    );
+    [a, b, c]
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, ark_ff::PrimeField};
+
+    /// SplitMix64, so the random instances are reproducible without a
+    /// test-only RNG dependency.
+    fn next_random(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A uniformly random field element, or one of the edge values 0, 1 and -1
+    /// (the largest element), each far more often than chance.
+    fn random_field_element(state: &mut u64) -> FieldElement {
+        match next_random(state) % 8 {
+            0 => FieldElement::zero(),
+            1 => FieldElement::one(),
+            2 => -FieldElement::one(),
+            _ => {
+                let bytes: Vec<u8> = (0..4)
+                    .flat_map(|_| next_random(state).to_le_bytes())
+                    .collect();
+                FieldElement::from_le_bytes_mod_order(&bytes)
+            }
+        }
+    }
+
+    /// A random R1CS whose linear combinations each have up to `max_terms`
+    /// terms over `witnesses` witnesses.
+    fn random_r1cs(state: &mut u64, constraints: usize, witnesses: usize, max_terms: u64) -> R1CS {
+        let mut r1cs = R1CS::new();
+        r1cs.add_witnesses(witnesses);
+        let linear_combination = |state: &mut u64| {
+            (0..next_random(state) % (max_terms + 1))
+                .map(|_| {
+                    (
+                        random_field_element(state),
+                        next_random(state) as usize % witnesses,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..constraints {
+            let a = linear_combination(state);
+            let b = linear_combination(state);
+            let c = linear_combination(state);
+            r1cs.add_constraint(&a, &b, &c);
+        }
+        r1cs
+    }
+
+    #[test]
+    fn external_row_without_transpose_matches_transposed_product() {
+        let mut state = 0xe7_u64;
+        for (constraints, witnesses, max_terms) in [
+            (1, 1, 1),
+            (1, 9, 4),
+            (7, 3, 6),
+            (64, 64, 3),
+            (100, 37, 12),
+            (513, 300, 5),
+            (1000, 1200, 20),
+        ] {
+            let r1cs = random_r1cs(&mut state, constraints, witnesses, max_terms);
+            let num_variables = usize::BITS - (constraints - 1).leading_zeros();
+            let alpha: Vec<FieldElement> = (0..num_variables.max(1))
+                .map(|_| random_field_element(&mut state))
+                .collect();
+            assert_eq!(
+                calculate_external_row_without_transpose(&alpha, &r1cs),
+                calculate_external_row_of_r1cs_matrices(&alpha, &r1cs),
+                "the external row without transposes differs from the transposed product for \
+                 {constraints} constraints over {witnesses} witnesses"
+            );
+        }
+    }
+}
