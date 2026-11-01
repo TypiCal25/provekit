@@ -4,10 +4,10 @@ use {
     nargo_cli::cli::compile_cmd::compile_workspace_full,
     nargo_toml::{resolve_workspace_from_toml, PackageSelection},
     noirc_driver::CompileOptions,
-    provekit_common::{Format, NoirProofScheme, Prover, Verifier},
+    provekit_common::{Format, NoirProof, NoirProofScheme, Prover, Verifier},
     provekit_prover::Prove,
     provekit_r1cs_compiler::NoirProofSchemeBuilder,
-    provekit_verifier::Verify,
+    provekit_verifier::{CheckedVerifier, Verify},
     serde::Deserialize,
     std::path::{Path, PathBuf},
     test_case::test_case,
@@ -74,6 +74,63 @@ fn test_compiler(test_case_path: impl AsRef<Path>) {
         .expect("While proving Noir program statement");
 
     verifier.verify(&proof).expect("Verifying proof");
+
+    check_checked_verifier_matches_verifier(&schema, &proof);
+}
+
+/// A `CheckedVerifier` must accept and reject exactly the proofs a fresh
+/// `Verifier` does, across repeated use, and must refuse an R1CS that does not
+/// match its scheme just as `Verifier` does.
+fn check_checked_verifier_matches_verifier(schema: &NoirProofScheme, proof: &NoirProof) {
+    let fresh_verdict = |proof: &NoirProof| {
+        Verifier::from_noir_proof_scheme(schema.clone())
+            .verify(proof)
+            .is_ok()
+    };
+    let checked = CheckedVerifier::new(Verifier::from_noir_proof_scheme(schema.clone()))
+        .expect("A verifier straight from its proof scheme must pass the R1CS hash check");
+
+    for attempt in 0..2 {
+        assert!(
+            checked.verify(proof).is_ok(),
+            "the checked verifier rejected a valid proof on use {attempt}"
+        );
+    }
+
+    let narg_length = proof.whir_r1cs_proof.narg_string.len();
+    let hints_length = proof.whir_r1cs_proof.hints.len();
+    for position in [0, narg_length / 2, narg_length - 1] {
+        let mut corrupted = proof.clone();
+        corrupted.whir_r1cs_proof.narg_string[position] ^= 1;
+        assert_eq!(
+            checked.verify(&corrupted).is_ok(),
+            fresh_verdict(&corrupted),
+            "verdicts differ on a proof with transcript byte {position} flipped"
+        );
+    }
+    for position in [0, hints_length / 2, hints_length.saturating_sub(1)] {
+        if hints_length == 0 {
+            break;
+        }
+        let mut corrupted = proof.clone();
+        corrupted.whir_r1cs_proof.hints[position] ^= 1;
+        assert_eq!(
+            checked.verify(&corrupted).is_ok(),
+            fresh_verdict(&corrupted),
+            "verdicts differ on a proof with hint byte {position} flipped"
+        );
+    }
+
+    let mut mismatched = Verifier::from_noir_proof_scheme(schema.clone());
+    mismatched.r1cs.add_witnesses(1);
+    assert!(
+        CheckedVerifier::new(mismatched.clone()).is_err(),
+        "the checked verifier accepted an R1CS that does not match its scheme"
+    );
+    assert!(
+        mismatched.verify(proof).is_err(),
+        "the verifier accepted an R1CS that does not match its scheme"
+    );
 }
 
 pub fn compile_workspace(workspace_path: impl AsRef<Path>) -> Result<Workspace> {
