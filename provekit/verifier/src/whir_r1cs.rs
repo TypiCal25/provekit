@@ -32,6 +32,19 @@ pub trait WhirR1CSVerifier {
         public_inputs: &PublicInputs,
         r1cs: &R1CS,
     ) -> Result<()>;
+
+    /// Runs every check of [`WhirR1CSVerifier::verify`] except comparing
+    /// `r1cs.hash()` with the scheme's R1CS hash.
+    ///
+    /// Only for callers that have already made that comparison for this exact
+    /// `r1cs` and scheme, and hold both so neither can change afterwards, as
+    /// [`crate::CheckedVerifier`] does.
+    fn verify_with_checked_r1cs(
+        &self,
+        proof: &WhirR1CSProof,
+        public_inputs: &PublicInputs,
+        r1cs: &R1CS,
+    ) -> Result<()>;
 }
 
 impl WhirR1CSVerifier for WhirR1CSScheme {
@@ -43,6 +56,16 @@ impl WhirR1CSVerifier for WhirR1CSScheme {
         r1cs: &R1CS,
     ) -> Result<()> {
         ensure!(r1cs.hash() == self.r1cs_hash, "R1CS hash mismatch");
+        self.verify_with_checked_r1cs(proof, public_inputs, r1cs)
+    }
+
+    #[instrument(skip_all)]
+    fn verify_with_checked_r1cs(
+        &self,
+        proof: &WhirR1CSProof,
+        public_inputs: &PublicInputs,
+        r1cs: &R1CS,
+    ) -> Result<()> {
         ensure!(
             self.has_public_inputs == (r1cs.num_public_inputs > 0),
             "WHIR scheme public-input declaration does not match R1CS"
