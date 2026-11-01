@@ -1,10 +1,7 @@
 use {
     crate::{FieldElement, InternedFieldElement, Interner},
     ark_std::Zero,
-    rayon::{
-        iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator},
-        slice::ParallelSliceMut,
-    },
+    rayon::iter::{IntoParallelIterator, IntoParallelRefMutIterator, ParallelIterator},
     serde::{
         de::{SeqAccess, Visitor},
         ser::SerializeStruct,
@@ -406,36 +403,45 @@ impl SparseMatrix {
     /// Returns a new `SparseMatrix` where entry (i, j) in the original
     /// becomes (j, i) in the result. The interned values are preserved
     /// and remain valid for the same `Interner`.
+    ///
+    /// Uses a counting sort on the column index, which runs in time linear in
+    /// the number of entries. Rows are visited in ascending order and each
+    /// entry is appended to its column's bucket, so every row of the result
+    /// lists its entries by ascending original row: the same (row, column)
+    /// order, and therefore the same matrix, as sorting the entries.
     pub fn transpose(&self) -> SparseMatrix {
-        let nnz = self.values.len();
-
-        let mut entries: Vec<(u32, u32, InternedFieldElement)> = Vec::with_capacity(nnz);
+        // Prefix sums of per-column counts give each result row's start.
+        let mut row_starts = vec![0u32; self.num_cols + 1];
         for row in 0..self.num_rows {
-            let range = self.row_range(row);
-            for i in range {
-                entries.push((self.col_indices[i], row as u32, self.values[i]));
+            for i in self.row_range(row) {
+                row_starts[self.col_indices[i] as usize + 1] += 1;
             }
         }
+        for col in 0..self.num_cols {
+            row_starts[col + 1] += row_starts[col];
+        }
+        let nnz = row_starts[self.num_cols] as usize;
+        row_starts.truncate(self.num_cols);
+        let new_row_indices = row_starts;
 
-        entries.par_sort_unstable_by_key(|&(new_row, new_col, _)| (new_row, new_col));
-        debug_assert!(
-            entries
-                .windows(2)
-                .all(|w| (w[0].0, w[0].1) != (w[1].0, w[1].1)),
-            "Duplicate (row, col) entries in sparse matrix transpose"
-        );
-
-        let mut new_row_indices = Vec::with_capacity(self.num_cols);
-        let mut col_indices = Vec::with_capacity(nnz);
-        let mut values = Vec::with_capacity(nnz);
-
-        let mut entry_idx = 0;
-        for row in 0..self.num_cols {
-            new_row_indices.push(entry_idx as u32);
-            while entry_idx < entries.len() && entries[entry_idx].0 == row as u32 {
-                col_indices.push(entries[entry_idx].1);
-                values.push(entries[entry_idx].2);
-                entry_idx += 1;
+        let mut next_slot = new_row_indices.clone();
+        let mut col_indices = vec![0u32; nnz];
+        let mut values = self
+            .values
+            .first()
+            .map_or_else(Vec::new, |&value| vec![value; nnz]);
+        for row in 0..self.num_rows {
+            for i in self.row_range(row) {
+                let slot = &mut next_slot[self.col_indices[i] as usize];
+                let position = *slot as usize;
+                debug_assert!(
+                    position == new_row_indices[self.col_indices[i] as usize] as usize
+                        || col_indices[position - 1] != row as u32,
+                    "Duplicate (row, col) entries in sparse matrix transpose"
+                );
+                col_indices[position] = row as u32;
+                values[position] = self.values[i];
+                *slot += 1;
             }
         }
 
@@ -745,6 +751,124 @@ mod tests {
             "delta encoding should reduce size: actual {} vs naive col bytes {}",
             actual_bytes,
             naive_col_bytes
+        );
+    }
+
+    /// The comparison-sort transpose that `transpose` replaced, kept as the
+    /// reference the counting sort must reproduce exactly.
+    fn transpose_by_sort(matrix: &SparseMatrix) -> SparseMatrix {
+        let mut entries: Vec<(u32, u32, InternedFieldElement)> = Vec::new();
+        for row in 0..matrix.num_rows {
+            for i in matrix.row_range(row) {
+                entries.push((matrix.col_indices[i], row as u32, matrix.values[i]));
+            }
+        }
+        entries.sort_unstable_by_key(|&(new_row, new_col, _)| (new_row, new_col));
+
+        let mut new_row_indices = Vec::with_capacity(matrix.num_cols);
+        let mut col_indices = Vec::with_capacity(entries.len());
+        let mut values = Vec::with_capacity(entries.len());
+        let mut entry_idx = 0;
+        for row in 0..matrix.num_cols {
+            new_row_indices.push(entry_idx as u32);
+            while entry_idx < entries.len() && entries[entry_idx].0 == row as u32 {
+                col_indices.push(entries[entry_idx].1);
+                values.push(entries[entry_idx].2);
+                entry_idx += 1;
+            }
+        }
+        SparseMatrix {
+            num_rows: matrix.num_cols,
+            num_cols: matrix.num_rows,
+            new_row_indices,
+            col_indices,
+            values,
+        }
+    }
+
+    /// SplitMix64, so the random matrices are reproducible without a test-only
+    /// RNG dependency.
+    fn next_random(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    /// A `rows` x `cols` matrix in which each entry is present with probability
+    /// `percent` / 100, holding one of `values` chosen at random.
+    fn random_matrix(
+        state: &mut u64,
+        rows: usize,
+        cols: usize,
+        percent: u64,
+        values: &[InternedFieldElement],
+    ) -> SparseMatrix {
+        let mut matrix = SparseMatrix::new(rows, cols);
+        for row in 0..rows {
+            for col in 0..cols {
+                if next_random(state) % 100 < percent {
+                    let value = values[next_random(state) as usize % values.len()];
+                    matrix.set(row, col, value);
+                }
+            }
+        }
+        matrix
+    }
+
+    #[test]
+    fn transpose_matches_sort_based_transpose() {
+        let mut interner = Interner::new();
+        let values: Vec<InternedFieldElement> = (1..=37u64)
+            .map(|value| interner.intern(FieldElement::from(value)))
+            .collect();
+        let mut state = 0x7a5e_u64;
+        let shapes = [
+            (0, 0),
+            (0, 5),
+            (5, 0),
+            (1, 1),
+            (1, 50),
+            (50, 1),
+            (17, 33),
+            (64, 64),
+            (150, 200),
+            (200, 150),
+        ];
+        for (rows, cols) in shapes {
+            for percent in [0, 3, 30, 100] {
+                let matrix = random_matrix(&mut state, rows, cols, percent, &values);
+                let transposed = matrix.transpose();
+                assert_eq!(
+                    transposed,
+                    transpose_by_sort(&matrix),
+                    "counting-sort transpose differs from the sort-based transpose for a \
+                     {rows}x{cols} matrix at {percent}% density"
+                );
+                assert_eq!(
+                    transposed.transpose(),
+                    matrix,
+                    "transposing twice must return the original {rows}x{cols} matrix at \
+                     {percent}% density"
+                );
+            }
+        }
+    }
+
+    /// Rows added by `grow` after entries exist share the final row index,
+    /// which the counting sort must handle like any other empty row.
+    #[test]
+    fn transpose_matches_sort_based_transpose_after_grow() {
+        let mut interner = Interner::new();
+        let values = [interner.intern(FieldElement::from(5u64))];
+        let mut state = 0x9e0_u64;
+        let mut matrix = random_matrix(&mut state, 20, 30, 25, &values);
+        matrix.grow(45, 60);
+        assert_eq!(
+            matrix.transpose(),
+            transpose_by_sort(&matrix),
+            "counting-sort transpose differs from the sort-based transpose after grow"
         );
     }
 }
