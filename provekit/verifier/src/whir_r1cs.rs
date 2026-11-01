@@ -7,7 +7,7 @@ use {
             OffsetCovector,
         },
         utils::sumcheck::{
-            calculate_eq, eval_cubic_poly, multiply_transposed_by_eq_alpha, transpose_r1cs_matrices,
+            calculate_eq, calculate_external_row_without_transpose, eval_cubic_poly,
         },
         FieldElement, PublicInputs, TranscriptSponge, WhirR1CSProof, WhirR1CSScheme, R1CS,
     },
@@ -84,12 +84,8 @@ impl WhirR1CSVerifier for WhirR1CSScheme {
             (None, Vec::new())
         };
 
-        let (transposed, sumcheck_result) = rayon::join(
-            || transpose_r1cs_matrices(r1cs),
-            || run_sumcheck_verifier(&mut arthur, self.m_0),
-        );
-        let data_from_sumcheck_verifier = sumcheck_result.context("while verifying sumcheck")?;
-        let (at, bt, ct) = transposed;
+        let data_from_sumcheck_verifier =
+            run_sumcheck_verifier(&mut arthur, self.m_0).context("while verifying sumcheck")?;
 
         let public_inputs_hash_buf: FieldElement = arthur
             .prover_message()
@@ -103,13 +99,8 @@ impl WhirR1CSVerifier for WhirR1CSScheme {
         );
         let x: FieldElement = arthur.verifier_message();
 
-        let alphas = multiply_transposed_by_eq_alpha(
-            &at,
-            &bt,
-            &ct,
-            &data_from_sumcheck_verifier.alpha,
-            r1cs,
-        );
+        let alphas =
+            calculate_external_row_without_transpose(&data_from_sumcheck_verifier.alpha, r1cs);
 
         let blinding_eval = data_from_sumcheck_verifier.blinding_eval;
         let blinding_weights = expand_powers::<4>(&data_from_sumcheck_verifier.alpha);

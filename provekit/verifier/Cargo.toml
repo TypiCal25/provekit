@@ -19,7 +19,6 @@ whir.workspace = true
 
 # 3rd party
 anyhow.workspace = true
-rayon.workspace = true
 tracing.workspace = true
 
 [lints]

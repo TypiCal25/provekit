@@ -4094,7 +4094,6 @@ dependencies = [
  "ark-std 0.6.0",
  "provekit-common",
  "provekit-whir",
- "rayon",
  "tracing",
 ]
 
